@@ -31,51 +31,57 @@
   - Add comprehensive logging for all plugin operations
   - _Requirements: 3.2, 3.3, 7.2, 8.1, 8.2_
 
-- [ ] 5. Implement CLI interface using Clap
-  - Create command-line interface with list, enable, disable, and execute commands
+- [x] 5. Implement CLI interface using Clap
+  - Replace placeholder main.rs with full CLI implementation
+  - Create command-line interface with list, enable, disable, execute, and serve commands
   - Add proper argument parsing and validation for all commands
   - Implement plugin execution with input parameter support
   - Add error handling with user-friendly error messages
   - Integrate with plugin manager for all operations
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
 
-- [ ] 6. Create HTTP API using Actix Web
+- [ ] 6. Create example plugins and build system
+  - Create plugins directory structure with three example plugins
+  - Implement plugin_a for string processing (uppercase, lowercase, reverse)
+  - Implement plugin_b for numeric processing (arithmetic operations)
+  - Implement plugin_c for JSON processing (parsing, formatting, querying)
+  - Configure each plugin as cdylib crate with proper dependencies
+  - Convert build_plugins.sh from PowerShell to bash script
+  - Add error reporting for plugin compilation failures
+  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
+
+- [ ] 7. Create HTTP API using Actix Web
+  - Create separate api.rs module in src directory
   - Set up Actix Web server with plugin management endpoints
   - Implement GET /plugins endpoint to list all plugins with status
   - Add POST /plugins/{name}/execute endpoint for plugin execution
   - Create PUT /plugins/{name}/enable and /plugins/{name}/disable endpoints
+  - Add GET /health endpoint for service monitoring
   - Add proper HTTP error handling and status codes
   - Implement request logging for all API operations
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 8.4_
 
-- [ ] 7. Add service mode and graceful shutdown handling
+- [ ] 8. Add service mode and graceful shutdown handling
+  - Integrate HTTP API server into main CLI application
   - Implement service mode that runs HTTP API as daemon
   - Add signal handling for graceful shutdown using ctrlc crate
   - Implement proper resource cleanup on shutdown
-  - Add health check endpoint for service monitoring
   - Handle network errors gracefully without service termination
   - _Requirements: 4.1, 7.4, 7.5_
 
-- [ ] 8. Create example plugins and build system
-  - Create three example plugins (string processing, numeric processing, JSON processing)
-  - Configure each plugin as cdylib crate with proper dependencies
-  - Implement register_plugin! macro usage in each example plugin
-  - Create build script that compiles all plugins to target/plugins directory
-  - Add error reporting for plugin compilation failures
-  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
-
-- [ ] 9. Implement comprehensive error handling and logging
-  - Add structured logging throughout the system using log crate
-  - Implement error handling that prevents system crashes from plugin failures
-  - Add configurable log levels with appropriate message filtering
-  - Ensure all plugin operations are logged with sufficient detail
-  - Add error recovery mechanisms where appropriate
+- [ ] 9. Enhance error handling and logging
+  - Initialize env_logger in main application with configurable levels
+  - Add structured logging for CLI operations and HTTP requests
+  - Ensure all plugin operations include appropriate log levels
+  - Add error recovery mechanisms for transient failures
+  - Implement proper error propagation from core to CLI/API layers
   - _Requirements: 7.1, 7.2, 7.3, 8.1, 8.2, 8.5_
 
-- [ ] 10. Add integration tests and documentation
-  - Create unit tests for core plugin system components
-  - Add integration tests for CLI commands and HTTP API endpoints
-  - Test plugin loading, execution, and error scenarios
-  - Create example plugin usage documentation
-  - Add system configuration documentation
+- [ ] 10. Add comprehensive integration tests
+  - Expand integration tests to cover plugin manager functionality
+  - Add CLI command testing with temporary configurations
+  - Create HTTP API endpoint tests using test client
+  - Test plugin loading, execution, and error scenarios with real plugins
+  - Add end-to-end tests that verify complete plugin lifecycle
+  - Test configuration persistence and reload functionality
   - _Requirements: All requirements validation through testing_
