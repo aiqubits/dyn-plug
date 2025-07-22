@@ -1,4 +1,4 @@
-# DynPlug
+# Product Overview
 
 **DynPlug** is a pluggable service system written in Rust that provides a dynamic plugin architecture for loading and executing external modules at runtime.
 
