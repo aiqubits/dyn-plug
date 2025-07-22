@@ -2,9 +2,10 @@ use actix_web::{
     web, App, HttpResponse, HttpServer, Result as ActixResult, middleware::Logger,
 };
 use dyn_plug_core::{PluginManager, PluginError};
-use log::{info, error, warn};
+use log::{info, error, warn, debug};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// API response wrapper for consistent response format
 #[derive(Serialize)]
@@ -66,12 +67,13 @@ pub struct AppState {
 
 /// GET /plugins - List all plugins with their status
 pub async fn list_plugins(data: web::Data<AppState>) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     info!("API: Listing all plugins");
     
     let manager = match data.plugin_manager.lock() {
         Ok(manager) => manager,
         Err(e) => {
-            error!("Failed to acquire plugin manager lock: {}", e);
+            error!("API: Failed to acquire plugin manager lock: {} (category: lock_error)", e);
             return Ok(HttpResponse::InternalServerError()
                 .json(ApiResponse::<()>::error("Internal server error".to_string())));
         }
@@ -89,7 +91,10 @@ pub async fn list_plugins(data: web::Data<AppState>) -> ActixResult<HttpResponse
         })
         .collect();
     
-    info!("API: Found {} plugins", plugin_infos.len());
+    let duration = start_time.elapsed();
+    info!("API: Found {} plugins in {}ms (category: list_success)", 
+          plugin_infos.len(), duration.as_millis());
+    
     Ok(HttpResponse::Ok().json(ApiResponse::success(plugin_infos)))
 }
 
@@ -99,15 +104,22 @@ pub async fn execute_plugin(
     payload: web::Json<ExecuteRequest>,
     data: web::Data<AppState>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let plugin_name = path.into_inner();
     let input = &payload.input;
     
-    info!("API: Executing plugin '{}' with input: '{}'", plugin_name, input);
+    info!("API: Executing plugin '{}' with input length: {}", plugin_name, input.len());
+    debug!("API: Plugin '{}' input content: '{}'", plugin_name, 
+           if input.len() > 100 { 
+               format!("{}...", &input[..100]) 
+           } else { 
+               input.to_string() 
+           });
     
     let manager = match data.plugin_manager.lock() {
         Ok(manager) => manager,
         Err(e) => {
-            error!("Failed to acquire plugin manager lock: {}", e);
+            error!("API: Failed to acquire plugin manager lock: {} (category: lock_error)", e);
             return Ok(HttpResponse::InternalServerError()
                 .json(ApiResponse::<()>::error("Internal server error".to_string())));
         }
@@ -115,8 +127,10 @@ pub async fn execute_plugin(
     
     match manager.execute_plugin(&plugin_name, input) {
         Ok(result) => {
+            let api_duration = start_time.elapsed();
             if result.success {
-                info!("API: Plugin '{}' executed successfully in {}ms", plugin_name, result.duration_ms);
+                info!("API: Plugin '{}' executed successfully in {}ms (API overhead: {}ms, category: execute_success)", 
+                      plugin_name, result.duration_ms, api_duration.as_millis().saturating_sub(result.duration_ms as u128));
                 let execution_result = ExecutionResult {
                     plugin: plugin_name,
                     output: result.output,
@@ -124,25 +138,35 @@ pub async fn execute_plugin(
                 };
                 Ok(HttpResponse::Ok().json(ApiResponse::success(execution_result)))
             } else {
-                warn!("API: Plugin '{}' execution failed: {}", plugin_name, result.output);
+                warn!("API: Plugin '{}' execution failed in {}ms: {} (category: execute_failed)", 
+                      plugin_name, result.duration_ms, result.output);
                 Ok(HttpResponse::BadRequest()
                     .json(ApiResponse::<()>::error(format!("Plugin execution failed: {}", result.output))))
             }
         }
         Err(PluginError::NotFound { .. }) => {
-            warn!("API: Plugin '{}' not found", plugin_name);
+            warn!("API: Plugin '{}' not found (category: not_found)", plugin_name);
             Ok(HttpResponse::NotFound()
                 .json(ApiResponse::<()>::error(format!("Plugin '{}' not found", plugin_name))))
         }
         Err(PluginError::PluginDisabled { .. }) => {
-            warn!("API: Plugin '{}' is disabled", plugin_name);
+            warn!("API: Plugin '{}' is disabled (category: plugin_disabled)", plugin_name);
             Ok(HttpResponse::BadRequest()
                 .json(ApiResponse::<()>::error(format!("Plugin '{}' is disabled", plugin_name))))
         }
         Err(e) => {
-            error!("API: Failed to execute plugin '{}': {}", plugin_name, e);
-            Ok(HttpResponse::InternalServerError()
-                .json(ApiResponse::<()>::error(format!("Failed to execute plugin: {}", e))))
+            error!("API: Failed to execute plugin '{}': {} (category: {})", plugin_name, e, e.category());
+            
+            let status_code = match &e {
+                PluginError::NotFound { .. } => actix_web::http::StatusCode::NOT_FOUND,
+                PluginError::PluginDisabled { .. } => actix_web::http::StatusCode::BAD_REQUEST,
+                PluginError::TimeoutError { .. } => actix_web::http::StatusCode::REQUEST_TIMEOUT,
+                PluginError::ResourceExhausted { .. } => actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            
+            Ok(HttpResponse::build(status_code)
+                .json(ApiResponse::<()>::error(e.user_friendly_message())))
         }
     }
 }
@@ -152,6 +176,7 @@ pub async fn enable_plugin(
     path: web::Path<String>,
     data: web::Data<AppState>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let plugin_name = path.into_inner();
     
     info!("API: Enabling plugin '{}'", plugin_name);
@@ -159,7 +184,7 @@ pub async fn enable_plugin(
     let mut manager = match data.plugin_manager.lock() {
         Ok(manager) => manager,
         Err(e) => {
-            error!("Failed to acquire plugin manager lock: {}", e);
+            error!("API: Failed to acquire plugin manager lock: {} (category: lock_error)", e);
             return Ok(HttpResponse::InternalServerError()
                 .json(ApiResponse::<()>::error("Internal server error".to_string())));
         }
@@ -167,19 +192,28 @@ pub async fn enable_plugin(
     
     match manager.enable_plugin(&plugin_name) {
         Ok(()) => {
-            info!("API: Plugin '{}' enabled successfully", plugin_name);
+            let duration = start_time.elapsed();
+            info!("API: Plugin '{}' enabled successfully in {}ms (category: enable_success)", 
+                  plugin_name, duration.as_millis());
             Ok(HttpResponse::Ok()
                 .json(ApiResponse::success(format!("Plugin '{}' enabled successfully", plugin_name))))
         }
         Err(PluginError::NotFound { .. }) => {
-            warn!("API: Plugin '{}' not found", plugin_name);
+            warn!("API: Plugin '{}' not found (category: not_found)", plugin_name);
             Ok(HttpResponse::NotFound()
                 .json(ApiResponse::<()>::error(format!("Plugin '{}' not found", plugin_name))))
         }
         Err(e) => {
-            error!("API: Failed to enable plugin '{}': {}", plugin_name, e);
-            Ok(HttpResponse::InternalServerError()
-                .json(ApiResponse::<()>::error(format!("Failed to enable plugin: {}", e))))
+            error!("API: Failed to enable plugin '{}': {} (category: {})", plugin_name, e, e.category());
+            
+            let status_code = match &e {
+                PluginError::NotFound { .. } => actix_web::http::StatusCode::NOT_FOUND,
+                PluginError::ConfigError { .. } => actix_web::http::StatusCode::BAD_REQUEST,
+                _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            
+            Ok(HttpResponse::build(status_code)
+                .json(ApiResponse::<()>::error(e.user_friendly_message())))
         }
     }
 }
@@ -189,6 +223,7 @@ pub async fn disable_plugin(
     path: web::Path<String>,
     data: web::Data<AppState>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let plugin_name = path.into_inner();
     
     info!("API: Disabling plugin '{}'", plugin_name);
@@ -196,7 +231,7 @@ pub async fn disable_plugin(
     let mut manager = match data.plugin_manager.lock() {
         Ok(manager) => manager,
         Err(e) => {
-            error!("Failed to acquire plugin manager lock: {}", e);
+            error!("API: Failed to acquire plugin manager lock: {} (category: lock_error)", e);
             return Ok(HttpResponse::InternalServerError()
                 .json(ApiResponse::<()>::error("Internal server error".to_string())));
         }
@@ -204,38 +239,54 @@ pub async fn disable_plugin(
     
     match manager.disable_plugin(&plugin_name) {
         Ok(()) => {
-            info!("API: Plugin '{}' disabled successfully", plugin_name);
+            let duration = start_time.elapsed();
+            info!("API: Plugin '{}' disabled successfully in {}ms (category: disable_success)", 
+                  plugin_name, duration.as_millis());
             Ok(HttpResponse::Ok()
                 .json(ApiResponse::success(format!("Plugin '{}' disabled successfully", plugin_name))))
         }
         Err(PluginError::NotFound { .. }) => {
-            warn!("API: Plugin '{}' not found", plugin_name);
+            warn!("API: Plugin '{}' not found (category: not_found)", plugin_name);
             Ok(HttpResponse::NotFound()
                 .json(ApiResponse::<()>::error(format!("Plugin '{}' not found", plugin_name))))
         }
         Err(e) => {
-            error!("API: Failed to disable plugin '{}': {}", plugin_name, e);
-            Ok(HttpResponse::InternalServerError()
-                .json(ApiResponse::<()>::error(format!("Failed to disable plugin: {}", e))))
+            error!("API: Failed to disable plugin '{}': {} (category: {})", plugin_name, e, e.category());
+            
+            let status_code = match &e {
+                PluginError::NotFound { .. } => actix_web::http::StatusCode::NOT_FOUND,
+                PluginError::ConfigError { .. } => actix_web::http::StatusCode::BAD_REQUEST,
+                _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            
+            Ok(HttpResponse::build(status_code)
+                .json(ApiResponse::<()>::error(e.user_friendly_message())))
         }
     }
 }
 
 /// GET /health - Health check endpoint
 pub async fn health_check() -> ActixResult<HttpResponse> {
-    info!("API: Health check requested");
+    debug!("API: Health check requested (category: health_check)");
     
     #[derive(Serialize)]
     struct HealthStatus {
         status: String,
         timestamp: String,
         version: String,
+        uptime_ms: u64,
     }
+    
+    // Simple uptime tracking (could be enhanced with actual process start time)
+    static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start_time = START_TIME.get_or_init(|| Instant::now());
+    let uptime = start_time.elapsed();
     
     let health = HealthStatus {
         status: "healthy".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_ms: uptime.as_millis() as u64,
     };
     
     Ok(HttpResponse::Ok().json(ApiResponse::success(health)))
@@ -248,7 +299,7 @@ pub async fn start_server(
     plugin_manager: PluginManager,
     host: &str,
     port: u16,
-    shutdown_signal: &mut tokio::sync::mpsc::Receiver<()>,
+    mut shutdown_signal: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting HTTP API server with graceful shutdown on {}:{}", host, port);
     

@@ -4,7 +4,7 @@ use crate::{
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Execution result with timing information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +25,56 @@ pub struct PluginStatus {
     pub loaded: bool,
     pub path: std::path::PathBuf,
     pub config_enabled: bool,
+}
+
+/// Options for plugin execution with error recovery
+#[derive(Debug, Clone)]
+pub struct ExecutionOptions {
+    /// Maximum number of retry attempts for transient failures
+    pub max_retries: u32,
+    /// Delay between retry attempts
+    pub retry_delay: Duration,
+    /// Timeout for plugin execution (None for no timeout)
+    pub timeout: Option<Duration>,
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            retry_delay: Duration::from_millis(100),
+            timeout: Some(Duration::from_secs(30)),
+        }
+    }
+}
+
+impl ExecutionOptions {
+    /// Create execution options with no retries
+    pub fn no_retry() -> Self {
+        Self {
+            max_retries: 1,
+            retry_delay: Duration::from_millis(0),
+            timeout: Some(Duration::from_secs(30)),
+        }
+    }
+    
+    /// Create execution options with aggressive retries
+    pub fn aggressive_retry() -> Self {
+        Self {
+            max_retries: 5,
+            retry_delay: Duration::from_millis(200),
+            timeout: Some(Duration::from_secs(60)),
+        }
+    }
+    
+    /// Create execution options with no timeout
+    pub fn no_timeout() -> Self {
+        Self {
+            max_retries: 2,
+            retry_delay: Duration::from_millis(100),
+            timeout: None,
+        }
+    }
 }
 
 /// High-level plugin manager that integrates registry and configuration
@@ -193,19 +243,41 @@ impl PluginManager {
 
     /// Execute a plugin with comprehensive error handling and result formatting
     pub fn execute_plugin(&self, name: &str, input: &str) -> PluginResult<ExecutionResult> {
-        info!("Executing plugin '{}' with input length: {}", name, input.len());
+        self.execute_plugin_with_options(name, input, ExecutionOptions::default())
+    }
+    
+    /// Execute a plugin with configurable execution options
+    pub fn execute_plugin_with_options(&self, name: &str, input: &str, options: ExecutionOptions) -> PluginResult<ExecutionResult> {
+        info!("Executing plugin '{}' with input length: {} (timeout: {:?}, retries: {})", 
+              name, input.len(), options.timeout, options.max_retries);
         
         let start_time = Instant::now();
         
         // Check if plugin exists first
         if !self.registry.has_plugin(name) {
+            error!("Plugin '{}' not found for execution", name);
             return Err(PluginError::NotFound {
                 name: name.to_string(),
             });
         }
         
-        // Execute the plugin
-        let result = self.registry.execute_plugin(name, input);
+        // Check if plugin is enabled
+        if let Some(status) = self.get_plugin_status(name) {
+            if !status.enabled || !status.config_enabled {
+                warn!("Attempted to execute disabled plugin '{}'", name);
+                return Err(PluginError::PluginDisabled {
+                    name: name.to_string(),
+                });
+            }
+        }
+        
+        // Execute the plugin with timeout and retry logic
+        let result = if let Some(timeout) = options.timeout {
+            self.execute_plugin_with_timeout(name, input, timeout, options.max_retries)
+        } else {
+            self.registry.execute_plugin_with_retry(name, input, options.max_retries, options.retry_delay)
+        };
+        
         let duration = start_time.elapsed();
         
         match result {
@@ -218,7 +290,7 @@ impl PluginManager {
                 };
                 
                 info!(
-                    "Plugin '{}' executed successfully in {}ms, output length: {}",
+                    "Plugin '{}' executed successfully in {}ms, output length: {} (category: execution_success)",
                     name,
                     execution_result.duration_ms,
                     execution_result.output.len()
@@ -229,14 +301,14 @@ impl PluginManager {
             Err(e) => {
                 let execution_result = ExecutionResult {
                     plugin: name.to_string(),
-                    output: format!("Error: {}", e),
+                    output: e.user_friendly_message(),
                     duration_ms: duration.as_millis() as u64,
                     success: false,
                 };
                 
                 error!(
-                    "Plugin '{}' execution failed after {}ms: {}",
-                    name, execution_result.duration_ms, e
+                    "Plugin '{}' execution failed after {}ms: {} (category: {})",
+                    name, execution_result.duration_ms, e, e.category()
                 );
                 
                 // Return the error result instead of propagating the error
@@ -244,6 +316,33 @@ impl PluginManager {
                 Ok(execution_result)
             }
         }
+    }
+    
+    /// Execute a plugin with timeout (simplified implementation)
+    fn execute_plugin_with_timeout(&self, name: &str, input: &str, timeout: std::time::Duration, max_retries: u32) -> PluginResult<String> {
+        // For now, we'll use a simple timeout approach without threading
+        // This could be enhanced later with async execution or proper thread management
+        let start_time = Instant::now();
+        
+        // Execute with retries, checking timeout between attempts
+        for attempt in 1..=max_retries {
+            if start_time.elapsed() >= timeout {
+                warn!("Plugin '{}' execution timed out after {:?} (attempt {})", name, timeout, attempt);
+                return Err(PluginError::timeout_error(format!("Plugin '{}' execution", name)));
+            }
+            
+            match self.registry.execute_plugin(name, input) {
+                Ok(result) => return Ok(result),
+                Err(e) if attempt < max_retries && e.is_transient() => {
+                    warn!("Transient error on attempt {}: {}. Retrying...", attempt, e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Err(PluginError::execution_failed("Maximum retries exceeded"))
     }
 
     /// Execute a plugin and return only the output (for backward compatibility)

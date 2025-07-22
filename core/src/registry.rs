@@ -44,8 +44,13 @@ impl PluginRegistry {
         }
     }
 
-    /// Scan the plugins directory and load all available plugins
+    /// Scan the plugins directory and load all available plugins with retry logic
     pub fn scan_and_load(&self) -> PluginResult<Vec<String>> {
+        self.scan_and_load_with_retry(3, std::time::Duration::from_millis(500))
+    }
+    
+    /// Scan the plugins directory and load all available plugins with configurable retry
+    pub fn scan_and_load_with_retry(&self, max_retries: u32, retry_delay: std::time::Duration) -> PluginResult<Vec<String>> {
         info!("Scanning plugins directory: {:?}", self.plugins_dir);
         
         if !self.plugins_dir.exists() {
@@ -56,6 +61,8 @@ impl PluginRegistry {
         }
 
         let mut loaded_plugins = Vec::new();
+        let mut failed_plugins = Vec::new();
+        
         let entries = std::fs::read_dir(&self.plugins_dir)?;
 
         for entry in entries {
@@ -64,19 +71,55 @@ impl PluginRegistry {
             
             if self.is_plugin_library(&path) {
                 debug!("Found potential plugin library: {:?}", path);
-                match self.load_plugin_from_path(&path) {
-                    Ok(plugin_name) => {
-                        loaded_plugins.push(plugin_name);
+                
+                // Try loading with retry logic for transient failures
+                let mut last_error = None;
+                let mut loaded = false;
+                
+                for attempt in 1..=max_retries {
+                    match self.load_plugin_from_path(&path) {
+                        Ok(plugin_name) => {
+                            if attempt > 1 {
+                                info!("Successfully loaded plugin '{}' on attempt {}", plugin_name, attempt);
+                            }
+                            loaded_plugins.push(plugin_name);
+                            loaded = true;
+                            break;
+                        }
+                        Err(e) => {
+                            last_error = Some(e);
+                            if attempt < max_retries && last_error.as_ref().unwrap().is_transient() {
+                                warn!("Transient error loading plugin from {:?} (attempt {}): {}. Retrying in {:?}...", 
+                                      path, attempt, last_error.as_ref().unwrap(), retry_delay);
+                                std::thread::sleep(retry_delay);
+                            } else {
+                                break;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to load plugin from {:?}: {}", path, e);
-                        // Continue loading other plugins despite this failure
+                }
+                
+                if !loaded {
+                    if let Some(error) = last_error {
+                        error!("Failed to load plugin from {:?} after {} attempts: {}", path, max_retries, error);
+                        failed_plugins.push((path.clone(), error));
                     }
                 }
             }
         }
 
-        info!("Successfully loaded {} plugins", loaded_plugins.len());
+        if !failed_plugins.is_empty() {
+            warn!("Failed to load {} plugins, but continuing with {} successful loads", 
+                  failed_plugins.len(), loaded_plugins.len());
+            
+            // Log detailed failure information
+            for (path, error) in &failed_plugins {
+                error!("Plugin load failure: {:?} - {} (category: {})", 
+                       path, error, error.category());
+            }
+        }
+
+        info!("Successfully loaded {} plugins ({} failed)", loaded_plugins.len(), failed_plugins.len());
         Ok(loaded_plugins)
     }
 
@@ -161,9 +204,14 @@ impl PluginRegistry {
         plugins.values().map(|p| p.info.clone()).collect()
     }
 
-    /// Execute a plugin by name
+    /// Execute a plugin by name with retry logic for transient failures
     pub fn execute_plugin(&self, name: &str, input: &str) -> PluginResult<String> {
-        debug!("Executing plugin: {} with input length: {}", name, input.len());
+        self.execute_plugin_with_retry(name, input, 2, std::time::Duration::from_millis(100))
+    }
+    
+    /// Execute a plugin by name with configurable retry logic
+    pub fn execute_plugin_with_retry(&self, name: &str, input: &str, max_retries: u32, retry_delay: std::time::Duration) -> PluginResult<String> {
+        debug!("Executing plugin: {} with input length: {} (max_retries: {})", name, input.len(), max_retries);
         
         let plugins = self.plugins.read().unwrap();
         let loaded_plugin = plugins.get(name).ok_or_else(|| {
@@ -180,16 +228,49 @@ impl PluginRegistry {
             });
         }
 
-        match loaded_plugin.plugin.execute(input) {
-            Ok(result) => {
-                debug!("Plugin {} executed successfully, output length: {}", name, result.len());
-                Ok(result)
-            }
-            Err(e) => {
-                error!("Plugin {} execution failed: {}", name, e);
-                Err(PluginError::execution_failed(e))
+        let mut last_error = None;
+        
+        for attempt in 1..=max_retries {
+            match loaded_plugin.plugin.execute(input) {
+                Ok(result) => {
+                    if attempt > 1 {
+                        info!("Plugin {} executed successfully on attempt {}, output length: {}", 
+                              name, attempt, result.len());
+                    } else {
+                        debug!("Plugin {} executed successfully, output length: {}", name, result.len());
+                    }
+                    return Ok(result);
+                }
+                Err(e) => {
+                    let plugin_error = PluginError::execution_failed(&e);
+                    last_error = Some(plugin_error);
+                    
+                    if attempt < max_retries && self.is_execution_error_transient(&e) {
+                        warn!("Transient execution error for plugin {} (attempt {}): {}. Retrying in {:?}...", 
+                              name, attempt, e, retry_delay);
+                        std::thread::sleep(retry_delay);
+                    } else {
+                        error!("Plugin {} execution failed on attempt {}: {}", name, attempt, e);
+                        break;
+                    }
+                }
             }
         }
+        
+        Err(last_error.unwrap())
+    }
+    
+    /// Check if a plugin execution error is transient and worth retrying
+    fn is_execution_error_transient(&self, error: &Box<dyn std::error::Error>) -> bool {
+        let error_str = error.to_string().to_lowercase();
+        
+        // Common transient execution errors
+        error_str.contains("timeout") ||
+        error_str.contains("temporary") ||
+        error_str.contains("busy") ||
+        error_str.contains("resource temporarily unavailable") ||
+        error_str.contains("would block") ||
+        error_str.contains("interrupted")
     }
 
     /// Enable a plugin
