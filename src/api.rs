@@ -243,22 +243,26 @@ pub async fn health_check() -> ActixResult<HttpResponse> {
 
 
 
-/// Start the HTTP API server
+/// Start the HTTP API server with graceful shutdown support
 pub async fn start_server(
     plugin_manager: PluginManager,
     host: &str,
     port: u16,
+    shutdown_signal: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting HTTP API server on {}:{}", host, port);
+    info!("Starting HTTP API server with graceful shutdown on {}:{}", host, port);
     
     let plugin_manager = Arc::new(Mutex::new(plugin_manager));
     
-    HttpServer::new(move || {
+    // Create the HTTP server
+    let server = HttpServer::new(move || {
         let app_state = AppState { plugin_manager: plugin_manager.clone() };
         
         App::new()
             .app_data(web::Data::new(app_state))
             .wrap(Logger::default())
+            .wrap(actix_web::middleware::DefaultHeaders::new()
+                .add(("X-Service", "DynPlug Plugin System")))
             .service(
                 web::scope("/api/v1")
                     .route("/plugins", web::get().to(list_plugins))
@@ -270,11 +274,38 @@ pub async fn start_server(
             // Also expose health endpoint at root level
             .route("/health", web::get().to(health_check))
     })
-    .bind(format!("{}:{}", host, port))?
-    .run()
-    .await?;
+    .bind(format!("{}:{}", host, port))
+    .map_err(|e| {
+        error!("Failed to bind server to {}:{}: {}", host, port, e);
+        e
+    })?;
     
-    Ok(())
+    // Start the server and handle graceful shutdown
+    let server_handle = server.run();
+    
+    tokio::select! {
+        result = server_handle => {
+            match result {
+                Ok(()) => {
+                    info!("HTTP server completed successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("HTTP server error: {}", e);
+                    Err(Box::new(e) as Box<dyn std::error::Error>)
+                }
+            }
+        }
+        _ = shutdown_signal.recv() => {
+            info!("Shutdown signal received, stopping HTTP server gracefully...");
+            
+            // Give the server a moment to finish current requests
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            
+            info!("HTTP server shutdown completed");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

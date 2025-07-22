@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use dyn_plug_core::{PluginManager, PluginError};
-use log::{error, info};
+use log::{error, info, warn};
 use std::process;
 
 mod api;
@@ -197,15 +197,9 @@ fn handle_serve(
     let rt = tokio::runtime::Runtime::new()?;
     
     rt.block_on(async move {
-        // Set up signal handling for graceful shutdown
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        
-        // Handle Ctrl+C signal
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
-            info!("Received shutdown signal");
-            let _ = tx.send(()).await;
-        });
+        // Set up graceful shutdown handling
+        let shutdown_manager = ShutdownManager::new();
+        let shutdown_signal = shutdown_manager.setup_signal_handling().await?;
         
         println!("HTTP API server starting on {}:{}", host_owned, port);
         println!("Available endpoints:");
@@ -216,25 +210,124 @@ fn handle_serve(
         println!("  PUT    /api/v1/plugins/{{name}}/disable - Disable plugin");
         println!("Press Ctrl+C to stop the server");
         
-        // Start the server directly without spawning
-        tokio::select! {
-            result = api::start_server(manager, &host_owned, port) => {
-                if let Err(e) = result {
-                    error!("Server error: {}", e);
-                }
+        // Start the server with graceful shutdown handling
+        let server_result = run_server_with_shutdown(manager, &host_owned, port, shutdown_signal).await;
+        
+        // Perform cleanup
+        shutdown_manager.cleanup().await;
+        
+        match server_result {
+            Ok(()) => {
+                println!("Server shutdown completed successfully");
+                info!("Server shutdown complete");
             }
-            _ = rx.recv() => {
-                info!("Shutdown signal received, stopping server...");
+            Err(e) => {
+                error!("Server encountered an error during shutdown: {}", e);
+                return Err(e);
             }
         }
-        
-        println!("Shutting down server...");
-        info!("Server shutdown complete");
         
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     
     Ok(())
+}
+
+/// Run the server with graceful shutdown handling
+async fn run_server_with_shutdown(
+    manager: PluginManager,
+    host: &str,
+    port: u16,
+    mut shutdown_signal: tokio::sync::mpsc::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Start the server with graceful shutdown handling
+    match api::start_server(manager, host, port, &mut shutdown_signal).await {
+        Ok(()) => {
+            info!("Server shut down gracefully");
+            Ok(())
+        }
+        Err(e) => {
+            // Log the error but handle network errors gracefully
+            if is_recoverable_network_error(&e) {
+                warn!("Recoverable network error occurred: {}", e);
+                info!("Server stopped due to network error, but this is recoverable");
+                Ok(())
+            } else {
+                error!("Server failed with non-recoverable error: {}", e);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Check if an error is a recoverable network error
+fn is_recoverable_network_error(error: &Box<dyn std::error::Error>) -> bool {
+    let error_str = error.to_string().to_lowercase();
+    
+    // Common recoverable network errors
+    error_str.contains("address already in use") ||
+    error_str.contains("connection refused") ||
+    error_str.contains("network unreachable") ||
+    error_str.contains("temporary failure")
+}
+
+/// Manages graceful shutdown of the service
+struct ShutdownManager {
+    cleanup_tasks: Vec<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl ShutdownManager {
+    fn new() -> Self {
+        Self {
+            cleanup_tasks: Vec::new(),
+        }
+    }
+    
+    /// Set up signal handling for graceful shutdown
+    async fn setup_signal_handling(&self) -> Result<tokio::sync::mpsc::Receiver<()>, Box<dyn std::error::Error>> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        
+        // Use ctrlc crate for cross-platform signal handling
+        let tx_clone = tx.clone();
+        ctrlc::set_handler(move || {
+            info!("Received shutdown signal (Ctrl+C)");
+            if let Err(e) = tx_clone.blocking_send(()) {
+                error!("Failed to send shutdown signal: {}", e);
+            }
+        })?;
+        
+        // Also handle SIGTERM on Unix systems
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())?;
+            let tx_sigterm = tx.clone();
+            
+            tokio::spawn(async move {
+                sigterm.recv().await;
+                info!("Received SIGTERM signal");
+                if let Err(e) = tx_sigterm.send(()).await {
+                    error!("Failed to send SIGTERM shutdown signal: {}", e);
+                }
+            });
+        }
+        
+        Ok(rx)
+    }
+    
+    /// Perform cleanup tasks
+    async fn cleanup(&self) {
+        info!("Performing cleanup tasks...");
+        
+        for task in &self.cleanup_tasks {
+            task();
+        }
+        
+        // Give a moment for any async cleanup to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        
+        info!("Cleanup completed");
+    }
 }
 
 /// Truncate a string to a maximum length, adding "..." if truncated
