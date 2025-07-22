@@ -3,6 +3,8 @@ use dyn_plug_core::{PluginManager, PluginError};
 use log::{error, info};
 use std::process;
 
+mod api;
+
 #[derive(Parser)]
 #[command(name = "dyn-plug")]
 #[command(about = "A pluggable service system")]
@@ -183,33 +185,54 @@ fn handle_execute(
 }
 
 fn handle_serve(
-    _manager: PluginManager,
+    manager: PluginManager,
     host: &str,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting HTTP API server on {}:{}", host, port);
     
-    // For now, we'll implement a basic placeholder that shows the server would start
-    // The actual HTTP API implementation will be done in task 7
-    println!("HTTP API server would start on {}:{}", host, port);
-    println!("Note: HTTP API implementation is not yet complete.");
-    println!("This is a placeholder for the serve command.");
+    let host_owned = host.to_string();
     
-    // Set up signal handling for graceful shutdown
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Create a new Tokio runtime for the server
+    let rt = tokio::runtime::Runtime::new()?;
     
-    ctrlc::set_handler(move || {
-        info!("Received shutdown signal");
-        tx.send(()).expect("Could not send signal on channel");
+    rt.block_on(async move {
+        // Set up signal handling for graceful shutdown
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        
+        // Handle Ctrl+C signal
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+            info!("Received shutdown signal");
+            let _ = tx.send(()).await;
+        });
+        
+        println!("HTTP API server starting on {}:{}", host_owned, port);
+        println!("Available endpoints:");
+        println!("  GET    /health                     - Health check");
+        println!("  GET    /api/v1/plugins             - List all plugins");
+        println!("  POST   /api/v1/plugins/{{name}}/execute - Execute plugin");
+        println!("  PUT    /api/v1/plugins/{{name}}/enable  - Enable plugin");
+        println!("  PUT    /api/v1/plugins/{{name}}/disable - Disable plugin");
+        println!("Press Ctrl+C to stop the server");
+        
+        // Start the server directly without spawning
+        tokio::select! {
+            result = api::start_server(manager, &host_owned, port) => {
+                if let Err(e) = result {
+                    error!("Server error: {}", e);
+                }
+            }
+            _ = rx.recv() => {
+                info!("Shutdown signal received, stopping server...");
+            }
+        }
+        
+        println!("Shutting down server...");
+        info!("Server shutdown complete");
+        
+        Ok::<(), Box<dyn std::error::Error>>(())
     })?;
-    
-    println!("Press Ctrl+C to stop the server");
-    
-    // Wait for shutdown signal
-    rx.recv()?;
-    
-    println!("Shutting down server...");
-    info!("Server shutdown complete");
     
     Ok(())
 }

@@ -50,7 +50,7 @@
   - Add error reporting for plugin compilation failures
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-- [ ] 7. Create HTTP API using Actix Web
+- [x] 7. Create HTTP API using Actix Web
   - Create separate api.rs module in src directory
   - Set up Actix Web server with plugin management endpoints
   - Implement GET /plugins endpoint to list all plugins with status
