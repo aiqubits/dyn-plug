@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "core",
+    "plugins/plugin_a",
+    "plugins/plugin_b",
+    "plugins/plugin_c",
 ]
 resolver = "2"
 

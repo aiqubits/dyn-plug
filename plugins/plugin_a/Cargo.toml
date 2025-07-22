@@ -1,0 +1,11 @@
+[package]
+name = "plugin_a"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dyn-plug-core = { path = "../../core" }
+serde_json = "1.0"
