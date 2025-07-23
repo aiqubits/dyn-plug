@@ -18,3 +18,5 @@
 - Plugin-based automation systems
 - Microservice orchestration
 - Dynamic feature loading
+
+## [Testing doc](./TESTING.md)

@@ -77,7 +77,7 @@
   - Implement proper error propagation from core to CLI/API layers
   - _Requirements: 7.1, 7.2, 7.3, 8.1, 8.2, 8.5_
 
-- [ ] 10. Add comprehensive integration tests
+- [x] 10. Add comprehensive integration tests
   - Expand integration tests to cover plugin manager functionality
   - Add CLI command testing with temporary configurations
   - Create HTTP API endpoint tests using test client
