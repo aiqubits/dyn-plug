@@ -4,4 +4,7 @@ server:
   host: 127.0.0.1
   port: 8080
   enabled: true
-plugins: {}
+plugins:
+  plugin_a:
+    enabled: true
+    settings: {}
